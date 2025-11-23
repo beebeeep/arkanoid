@@ -33,30 +33,6 @@ struct Game {
     last_update: Instant,
 }
 
-/*
-impl From<(f32, f32)> for Vector2 {
-    fn from(v: (f32, f32)) -> Self {
-        Self { x: v.0, y: v.1 }
-    }
-}
-
-impl From<(i32, i32)> for Vector2 {
-    fn from(v: (i32, i32)) -> Self {
-        Self {
-            x: v.0 as f32,
-            y: v.1 as f32,
-        }
-    }
-}
-
-impl std::ops::AddAssign<Vector2> for Vector2 {
-    fn add_assign(&mut self, rhs: Vector2) {
-        self.x += rhs.x;
-        self.y += rhs.y;
-    }
-}
-*/
-
 impl Brick {
     fn new(x: f32, y: f32, hp: i32) -> Self {
         Self {
@@ -106,7 +82,7 @@ impl Ball {
 
 impl Game {
     fn render(&self, rl: &mut RaylibHandle, thread: &RaylibThread) {
-        rl.draw(&thread, |mut d| {
+        rl.draw(thread, |mut d| {
             d.clear_background(Color::BLACK);
             let p = &self.pad;
 
@@ -220,11 +196,11 @@ fn main() {
     };
     for col in 0..W / BRICK_W {
         for row in 0..H / BRICK_H / 2 {
-            game.bricks.push(Brick {
-                pos: Vector2::new((col * BRICK_W) as f32, (row * BRICK_H) as f32),
-                size: Vector2::new(BRICK_W as f32, BRICK_H as f32),
-                hp: 1,
-            });
+            game.bricks.push(Brick::new(
+                (col * BRICK_W) as f32,
+                (row * BRICK_H) as f32,
+                1,
+            ));
         }
     }
 
