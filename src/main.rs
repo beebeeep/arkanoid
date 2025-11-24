@@ -1,90 +1,131 @@
 use rand::prelude::*;
-use std::time::Instant;
+use std::{f32, time::Instant};
 
-use delaunator::{Point, triangulate};
+// use delaunator::{Point, triangulate};
 use raylib::prelude::*;
+use voronoice::{BoundingBox, Point, VoronoiBuilder};
 
 const W: i32 = 1024;
 const H: i32 = 768;
 const PAD_W: i32 = 60;
 const PAD_H: i32 = 10;
 const BALL_R: f32 = 10.0;
-const BRICK_W: i32 = 40;
-const BRICK_H: i32 = 20;
-
-struct Brick {
-    pos: Vector2,
-    size: Vector2,
-    hp: i32,
-}
 
 struct Shard {
     edges: Vec<Vector2>,
+    center: Vector2,
     hp: i32,
+    id: usize,
 }
 
 struct Pad {
-    pos: Vector2,
-    size: Vector2,
+    poly: Vec<Vector2>,
 }
 
 struct Ball {
     pos: Vector2,
+    radius: f32,
     speed: Vector2,
 }
 
 struct Game {
     pad: Pad,
-    bricks: Vec<Brick>,
     shards: Vec<Shard>,
     ball: Ball,
     last_update: Instant,
 }
 
-impl Brick {
-    fn new(x: f32, y: f32, hp: i32) -> Self {
-        Self {
-            pos: Vector2 { x, y },
-            size: Vector2 {
-                x: BRICK_W as f32,
-                y: BRICK_H as f32,
-            },
-            hp,
+impl Shard {
+    fn render(&self, dh: &mut RaylibDrawHandle) {
+        let color = match self.hp {
+            1 => Color::DARKRED,
+            2 => Color::ORANGERED,
+            3 => Color::ORANGE,
+            _ => Color::DARKORANGE,
+        };
+
+        dh.draw_triangle_fan(&self.edges, color);
+        for i in 0..self.edges.len() {
+            // outline
+            dh.draw_line_v(
+                self.edges[i],
+                self.edges[(i + 1) % self.edges.len()],
+                Color::WHITE,
+            );
+        }
+    }
+}
+
+impl Pad {
+    fn render(&self, dh: &mut RaylibDrawHandle) {
+        dh.draw_triangle_fan(&self.poly, Color::GREEN);
+        for i in 0..self.poly.len() {
+            // outline
+            dh.draw_line_v(
+                self.poly[i],
+                self.poly[(i + 1) % self.poly.len()],
+                Color::WHITE,
+            );
+        }
+    }
+
+    fn translate(&mut self, delta: &Vector2) {
+        if delta.x < 0.0 && self.poly[0].x <= 0.0 {
+            // left border
+            return;
+        }
+        if delta.x > 0.0 && self.poly[1].x >= W as f32 {
+            // right border
+            return;
+        }
+        for e in &mut self.poly {
+            *e += *delta;
         }
     }
 }
 
 impl Ball {
-    fn collides(&self, rect: Vector2, size: Vector2) -> Option<Vector2> {
-        let (left, right, bottom, top) = (rect.x, rect.x + size.x, rect.y, rect.y + size.y);
-
-        let closest_x = self.pos.x.clamp(left, right);
-        let closest_y = self.pos.y.clamp(bottom, top);
-
-        let dx = self.pos.x - closest_x;
-        let dy = self.pos.y - closest_y;
-        if dx * dx + dy * dy > BALL_R * BALL_R {
+    fn collides(&self, poly: &[Vector2]) -> Option<Vector2> {
+        if poly.len() < 2 {
             return None;
         }
 
-        if closest_y == self.pos.y {
-            // hit horizontal side
-            if self.pos.x < left {
-                return Some(Vector2::new(-1.0, 0.0));
-            } else {
-                return Some(Vector2::new(1.0, 0.0));
+        let mut best_pen = -f32::INFINITY;
+        let mut best_n = Vector2::default();
+        for i in 0..poly.len() {
+            let a = poly[i];
+            let b = poly[(i + 1) % poly.len()];
+            let cp = self.closest_point(a, b);
+            let delta = self.pos - cp;
+            let dist = delta.length();
+            if dist > self.radius {
+                continue;
             }
-        }
-        if closest_x == self.pos.x {
-            // hit vertical side
-            if self.pos.y < bottom {
-                return Some(Vector2::new(0.0, -1.0));
+
+            let pen = self.radius - dist;
+            if pen <= best_pen {
+                continue;
+            }
+            best_pen = pen;
+            best_n = if dist > 0.0 {
+                delta * (1.0 / dist)
             } else {
-                return Some(Vector2::new(0.0, 1.0));
+                // exactly on edge
+                Vector2::new(1.0, 0.0)
             }
         }
 
-        None
+        if best_pen > 0.0 {
+            Some(best_n.normalized())
+        } else {
+            None
+        }
+    }
+
+    fn closest_point(&self, a: Vector2, b: Vector2) -> Vector2 {
+        let d = b - a;
+        let t = (self.pos - a).dot(d) / d.dot(d);
+        a + d * t.clamp(0.0, 1.0)
     }
 }
 
@@ -92,89 +133,62 @@ impl Game {
     fn render(&self, rl: &mut RaylibHandle, thread: &RaylibThread) {
         let mut d = rl.begin_drawing(thread);
         d.clear_background(Color::BLACK);
-        let p = &self.pad;
 
-        d.draw_rectangle(
-            p.pos.x as i32,
-            p.pos.y as i32,
-            p.size.x as i32,
-            p.size.y as i32,
-            Color::LIGHTGREEN,
-        );
+        self.pad.render(&mut d);
 
-        for b in &self.bricks {
-            if b.hp < 1 {
+        for s in &self.shards {
+            if s.hp < 1 {
                 continue;
             }
-            d.draw_rectangle(
-                b.pos.x as i32,
-                b.pos.y as i32,
-                b.size.x as i32,
-                b.size.y as i32,
-                Color::RED,
-            );
-            d.draw_rectangle_lines(
-                b.pos.x as i32,
-                b.pos.y as i32,
-                b.size.x as i32,
-                b.size.y as i32,
-                Color::DARKRED,
-            );
-            let txt = format!("{}", b.hp);
-
+            // d.draw_triangle_fan(&s.edges, Color::PINK);
+            // d.draw_triangle_strip(&s.edges, Color::HOTPINK);
+            // d.draw_line_strip(&s.edges, Color::PINK);
+            s.render(&mut d);
             d.draw_text(
-                &txt,
-                (b.pos.x) as i32 + b.size.x as i32 / 2,
-                (b.pos.y + b.size.y * 0.2) as i32,
-                (b.size.y * 0.75) as i32,
-                Color::YELLOW,
+                &format!("{}", s.id),
+                s.center.x as i32,
+                s.center.y as i32,
+                10,
+                Color::PINK,
             );
         }
 
         d.draw_circle(
             self.ball.pos.x as i32,
             self.ball.pos.y as i32,
-            BALL_R,
+            self.ball.radius,
             Color::LIGHTBLUE,
         );
-
-        for e in &self.shards {
-            d.draw_line_strip(&e.edges, Color::PINK);
-        }
     }
 
     fn update(&mut self, rl: &RaylibHandle) {
         self.last_update = Instant::now();
 
         // moving pad
-        self.pad.pos.x += rl.get_mouse_delta().x / 2.0;
-        if self.pad.pos.x >= (W - PAD_W) as f32 {
-            self.pad.pos.x = (W - PAD_W) as f32;
-        }
-        if self.pad.pos.x <= 0.0 {
-            self.pad.pos.x = 0.0
-        }
+        self.pad
+            .translate(&Vector2::new(rl.get_mouse_delta().x / 2.0, 0.0));
 
         // ball collisions
         self.ball.pos += self.ball.speed;
-        if self.ball.pos.x <= BALL_R || self.ball.pos.x >= W as f32 - BALL_R {
+        if self.ball.pos.x <= self.ball.radius || self.ball.pos.x >= W as f32 - self.ball.radius {
             self.ball.speed.x *= -1.0;
         }
-        if self.ball.pos.y <= BALL_R || self.ball.pos.y >= H as f32 - BALL_R {
+        if self.ball.pos.y <= self.ball.radius || self.ball.pos.y >= H as f32 - self.ball.radius {
             self.ball.speed.y *= -1.0;
         }
 
-        if let Some(n) = self.ball.collides(self.pad.pos, self.pad.size) {
+        if let Some(n) = self.ball.collides(&self.pad.poly) {
             self.ball.speed = reflect(self.ball.speed, n);
         }
 
-        for b in &mut self.bricks {
-            if b.hp < 1 {
+        for s in &mut self.shards {
+            if s.hp < 1 {
                 continue;
             }
-            if let Some(n) = self.ball.collides(b.pos, b.size) {
+            if let Some(n) = self.ball.collides(&s.edges) {
+                eprintln!("hit shard {}", s.id);
                 self.ball.speed = reflect(self.ball.speed, n);
-                b.hp -= 1;
+                s.hp -= 1;
             }
         }
     }
@@ -197,49 +211,58 @@ fn main() {
             y: rng.random_range(0.0..(H / 3) as f64),
         });
     }
-    let mut tr = triangulate(&points).triangles.into_iter();
-    let mut shards = Vec::with_capacity(points.capacity());
-    loop {
-        if let (Some(p1), Some(p2), Some(p3)) = (tr.next(), tr.next(), tr.next()) {
-            shards.push(Shard {
-                edges: vec![
-                    Vector2::new(points[p1].x as f32, points[p1].y as f32),
-                    Vector2::new(points[p2].x as f32, points[p2].y as f32),
-                    Vector2::new(points[p3].x as f32, points[p3].y as f32),
-                ],
-                hp: 1,
-            });
-        } else {
-            break;
-        }
-    }
+    let voronoi = VoronoiBuilder::default()
+        .set_sites(points)
+        .set_bounding_box(BoundingBox::new(
+            Point {
+                x: (W / 2) as f64,
+                y: (H / 6) as f64,
+            },
+            W as f64,
+            (H / 3) as f64,
+        ))
+        .set_lloyd_relaxation_iterations(5)
+        .build()
+        .expect("building shards");
+    let shards: Vec<_> = voronoi
+        .iter_cells()
+        .enumerate()
+        .map(|(i, c)| Shard {
+            center: Vector2 {
+                x: c.site_position().x as f32,
+                y: c.site_position().y as f32,
+            },
+            edges: c
+                .iter_vertices()
+                .map(|v| Vector2::new(v.x as f32, v.y as f32))
+                .collect(),
+            hp: rng.random_range(1..5),
+            id: i,
+        })
+        .collect();
 
     let (mut rl, thread) = raylib::init().size(W, H).title("Arkanoid").build();
     let mut game = Game {
         last_update: Instant::now(),
         pad: Pad {
-            pos: Vector2::new((W / 2) as f32, (H - PAD_H) as f32),
-            size: Vector2::new(PAD_W as f32, PAD_H as f32),
+            // vertexes shall go counter-clockwise:
+            //  3 +--------+ 2
+            //    |        |
+            //  0 +--------+ 1
+            poly: vec![
+                Vector2::new((W / 2) as f32, (H) as f32),
+                Vector2::new((W / 2 + PAD_W) as f32, (H) as f32),
+                Vector2::new((W / 2 + PAD_W) as f32, (H - PAD_H) as f32),
+                Vector2::new((W / 2) as f32, (H - PAD_H) as f32),
+            ],
         },
-        bricks: Vec::new(),
         shards,
         ball: Ball {
-            pos: Vector2::new(
-                (W / 2 + PAD_W / 2) as f32,
-                1.0 + (H - PAD_H) as f32 - BALL_R,
-            ),
-            speed: Vector2::new(8.0, -5.0),
+            pos: Vector2::new((W / 2 + PAD_W / 2) as f32, (H - PAD_H - 1) as f32 - BALL_R),
+            radius: BALL_R,
+            speed: Vector2::new(rng.random_range(-10.0..10.0), rng.random_range(-10.0..0.0)),
         },
     };
-    for col in 0..W / BRICK_W {
-        for row in 0..H / BRICK_H / 2 {
-            game.bricks.push(Brick::new(
-                (col * BRICK_W) as f32,
-                (row * BRICK_H) as f32,
-                1,
-            ));
-        }
-    }
 
     rl.set_target_fps(60);
     rl.gui_lock();
